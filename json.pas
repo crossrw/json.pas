@@ -18,6 +18,8 @@ type TJSONValueType = (jtString, jtNumber, jtObject, jtArray, jtBoolean, jtNull)
        FValueNumber: Double;
        FValueString: AnsiString;
        //
+       FCommentsAllowed: Boolean;
+       //
        function GetChar(const SkipSpaces: Boolean = True): Char;
        procedure GoBack;
        function GetValueType: TJSONValueType;
@@ -27,6 +29,7 @@ type TJSONValueType = (jtString, jtNumber, jtObject, jtArray, jtBoolean, jtNull)
        function GetNumber: Double;
        function GetBoolean: Boolean;
        procedure GetNull;
+       procedure PurgeComments;
        //
        procedure AddValue(JSONValue: TJSONValue);
        function FindByName(const Name: AnsiString): TJSONValue;
@@ -38,6 +41,7 @@ type TJSONValueType = (jtString, jtNumber, jtObject, jtArray, jtBoolean, jtNull)
        procedure LoadFromStream(AStream: TStream; const AName: AnsiString = '');
        procedure LoadFromFile(const FileName: String);
        procedure Clear;
+       property CommentsAllowed: Boolean read FCommentsAllowed write FCommentsAllowed;
        //
        function ByPath(const path: String): TJSONValue;
        function PathExist(const path: String): Boolean;
@@ -64,11 +68,38 @@ type TJSONValueType = (jtString, jtNumber, jtObject, jtArray, jtBoolean, jtNull)
 
 implementation
 
+function StreamLinePos(const Stream: TStream; const Offset: Integer = -1): String;
+var OrigPos, EndPos, Line, LinePos: Integer;
+    B: Char;
+begin
+ OrigPos:= Stream.Position;
+ EndPos:= OrigPos + Offset;
+ LinePos:= 1;
+ Line:= 1;
+ //
+ If EndPos > 0 then begin
+  Stream.Position:= 0;
+  try
+   While Stream.Position < EndPos do begin
+    Stream.Read(B, 1);
+    If B = #10 then begin
+     LinePos:= 1;
+     Inc(Line);
+    end else Inc(LinePos);
+   end;
+  finally
+   Stream.Position:= OrigPos;
+  end;
+ end;
+ result:= Format('line %d pos %d', [Line, LinePos]);
+end;
+
 constructor TJSONValue.Create;
 begin
  inherited;
  //
  FValues:= Nil;
+ FCommentsAllowed:= False;
 end;
 
 destructor TJSONValue.Destroy;
@@ -95,41 +126,43 @@ begin
   jtBoolean: If GetBoolean then FValueNumber:= 1 else FValueNumber:= 0;
   jtNull: GetNull;
   jtObject: begin
-   GetChar;                         // открывающая скобка '{'
-   If GetChar = '}' then Exit;      // проверка на пустой объект
+   GetChar();                       // открывающая скобка '{'
+   If GetChar() = '}' then Exit;    // проверка на пустой объект
    GoBack;
    repeat
     // имя
     EName:= GetString;
     // разделитель
-    If GetChar <> ':' then raise EJSONException.CreateFmt('colon expected at pos %d', [FStream.Position-1]);
+    If GetChar() <> ':' then raise EJSONException.CreateFmt('colon expected at %s', [StreamLinePos(FStream)]);
     // значение
     JV:= TJSONValue.Create;
+    JV.FCommentsAllowed:= FCommentsAllowed;
     JV.LoadFromStream(FStream, EName);
     AddValue(JV);
     // проверка на завершение
-    B:= GetChar;
+    B:= GetChar();
     If B = '}' then Break;
     If B = ',' then Continue;
-    raise EJSONException.CreateFmt('expected "," or "}" at pos %d', [FStream.Position-1]);
+    raise EJSONException.CreateFmt('expected "," or "}" at %s', [StreamLinePos(FStream)]);
    until False;
   end;
   jtArray: begin
    Index:= 0;
-   GetChar;                         // открывающая скобка '['
-   If GetChar = ']' then Exit;      // проверка на пустой объект
+   GetChar();                       // открывающая скобка '['
+   If GetChar() = ']' then Exit;    // проверка на пустой объект
    GoBack;
    repeat
     // очередное значение
     JV:= TJSONValue.Create;
+    JV.FCommentsAllowed:= FCommentsAllowed;
     JV.LoadFromStream(FStream, IntToStr(Index));
     AddValue(JV);
     Inc(Index);
     // проверка на завершение
-    B:= GetChar;
+    B:= GetChar();
     If B = ']' then Break;
     If B = ',' then Continue;
-    raise EJSONException.CreateFmt('expected "," or "]" at pos %d', [FStream.Position-1]);
+    raise EJSONException.CreateFmt('expected "," or "]" at %s', [StreamLinePos(FStream)]);
    until False;
   end;
  end;
@@ -160,7 +193,7 @@ function TJSONValue.GetChar(const SkipSpaces: Boolean = True): Char;
 var B: Char;
 begin
  repeat
-  If FStream.Read(B, 1) <> 1 then raise EJSONException.CreateFmt('unexpected end of file at pos %d', [FStream.Position]);
+  If FStream.Read(B, 1) <> 1 then raise EJSONException.CreateFmt('unexpected end of file at %s', [StreamLinePos(FStream, 0)]);
  until (not (B in [#8,#9,#10,#12,#13,#32])) or (not SkipSpaces);
  result:= B;
 end;
@@ -173,15 +206,16 @@ end;
 function TJSONValue.GetValueType: TJSONValueType;
 begin
  result:= jtNull;
+ //
  try
-  Case GetChar of
-   '"': result:= jtString;
-   '-', '0'..'9': result:= jtNumber;
-   '{': result:= jtObject;
-   '[': result:= jtArray;
-   't', 'f': result:= jtBoolean;
-   'n': result:= jtNull;
-   else raise EJSONException.CreateFmt('unknown value at pos %d', [FStream.Position-1]);
+  Case GetChar() of
+   '"':             result:= jtString;
+   '-', '0'..'9':   result:= jtNumber;
+   '{':             result:= jtObject;
+   '[':             result:= jtArray;
+   't', 'f':        result:= jtBoolean;
+   'n':             result:= jtNull;
+   else raise EJSONException.CreateFmt('unknown value at %s', [StreamLinePos(FStream)]);
   end;
  finally
   GoBack;
@@ -193,16 +227,45 @@ var S: AnsiString;
     I: Integer;
 begin
  S:= '';
- For I:= 1 to N do S:= S + GetChar;
+ For I:= 1 to N do S:= S + GetChar();
  result:= S;
+end;
+
+procedure TJSONValue.PurgeComments;
+var RemStart: String;
+    B1, B2: Char;
+begin
+  If not FCommentsAllowed then Exit;
+  //
+  repeat
+    RemStart:= GetChars(2);
+    If RemStart = '/*' then begin
+      // коментарий "/* */", , читаем до "*/"
+      B1:= ' ';
+      repeat
+        B2:= B1;
+        B1:= GetChar();
+      until (B2 = '*') and (B1 = '/');
+    end else If RemStart = '//' then begin
+      // коментарий "//", читаем до конца строки
+      While GetChar(False) <> #10 do;
+    end else begin
+      // это не коментарий
+      GoBack();
+      GoBack();
+      Break;
+    end;
+  until False;
 end;
 
 function TJSONValue.GetString: AnsiString;
 var S: AnsiString;
     B, B1: Char;
 begin
- B:= GetChar;
- If B <> '"' then raise EJSONException.CreateFmt('bad string format pos %d', [FStream.Position-1]);
+ PurgeComments;
+ //
+ B:= GetChar();
+ If B <> '"' then raise EJSONException.CreateFmt('bad string format at %s', [StreamLinePos(FStream)]);
  //
  S:= '';
  repeat
@@ -219,11 +282,11 @@ begin
     'n': S:= S + #10;
     'r': S:= S + #13;
     't': S:= S + #9;
-    'u': raise EJSONException.CreateFmt('sorry, hex digits unsupported at pos %d', [FStream.Position-1]);
-    else raise EJSONException.CreateFmt('unknown symbol at pos %d', [FStream.Position-1]);
+    'u': raise EJSONException.CreateFmt('sorry, hex digits unsupported at %s', [StreamLinePos(FStream)]);
+    else raise EJSONException.CreateFmt('unknown symbol at %s', [StreamLinePos(FStream)]);
    end;
   end else S:= S + B;
-  If Length(S) > 1024 then raise EJSONException.CreateFmt('string too long at pos %d', [FStream.Position-1024]);
+  If Length(S) > 1024 then raise EJSONException.CreateFmt('string too long at %s', [StreamLinePos(FStream, -1024)]);
  until False;
  result:= S;
 end;
@@ -236,7 +299,7 @@ var S: String;
 begin
  S:= '';
  repeat
-  B:= GetChar;
+  B:= GetChar();
   If B in ['-','+','0'..'9','.','e','E'] then S:= S + B else begin
    GoBack;
    Break;
@@ -244,24 +307,24 @@ begin
  until False;
  //
  Val(S, D, Code);
- If Code <> 0 then raise EJSONException.CreateFmt('unknown number at pos %d', [FStream.Position - Code]);
+ If Code <> 0 then raise EJSONException.CreateFmt('unknown number at %s', [StreamLinePos(FStream, -Code)]);
  result:= D;
 end;
 
 function TJSONValue.GetBoolean: Boolean;
 begin
- If GetChar = 't' then begin
-  If GetChars(3) <> 'rue' then raise EJSONException.CreateFmt('bad value at pos %d', [FStream.Position - 4]);
+ If GetChar() = 't' then begin
+  If GetChars(3) <> 'rue' then raise EJSONException.CreateFmt('bad value at %s', [StreamLinePos(FStream, -4)]);
   result:= True;
  end else begin
-  If GetChars(4) <> 'alse' then raise EJSONException.CreateFmt('bad value at pos %d', [FStream.Position - 5]);
+  If GetChars(4) <> 'alse' then raise EJSONException.CreateFmt('bad value at %s', [StreamLinePos(FStream, -5)]);
   result:= False;
  end;
 end;
 
 procedure TJSONValue.GetNull;
 begin
- If GetChars(4) <> 'null' then raise EJSONException.CreateFmt('bad value at pos %d', [FStream.Position - 4]);
+ If GetChars(4) <> 'null' then raise EJSONException.CreateFmt('bad value at %s', [StreamLinePos(FStream, -4)]);
 end;
 
 procedure TJSONValue.AddValue(JSONValue: TJSONValue);
@@ -347,17 +410,12 @@ begin
 end;
 
 function FloatStrEx(const V: Double): String;
-{$IFDEF MSWINDOWS}
 var FormatSettings: TFormatSettings;
-{$ENDIF}
 begin
-{$IFDEF MSWINDOWS}
+ //FormatSettings:= DefaultFormatSettings;
  GetLocaleFormatSettings(0, FormatSettings);
  FormatSettings.DecimalSeparator:= '.';
  result:= FloatToStr(V, FormatSettings);
-{$ELSE}
- result:= FloatToStr(V);
-{$ENDIF}
 end;
 
 function TJSONValue.AsString: AnsiString;
