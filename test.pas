@@ -11,6 +11,8 @@ begin
  // see example file: test.json
  //
  JS:= TJSONValue.Create;
+ // comments support on
+ JS.CommentsAllowed:= True;
  try
   JS.LoadFromFile('test.json');
   // values by path
