@@ -1,6 +1,8 @@
 {
   "glossary": {
+    /* comment example 1 */
     "title": "example glossary",
+    // comment example 2
     "Active": true,
     "Owner": null,
     "Age": 35,
